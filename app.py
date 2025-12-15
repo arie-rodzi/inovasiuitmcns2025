@@ -107,7 +107,8 @@ def already_checked_in(email: str) -> bool:
 
 def confirm_checkin(row):
     # row = (email, nama, gelaran, no_meja)
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    tz = pytz.timezone("Asia/Kuala_Lumpur")
+    now = datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
     # micro-safety: reduce collision when ramai tekan serentak
     time.sleep(0.15)
     with get_conn() as conn:
