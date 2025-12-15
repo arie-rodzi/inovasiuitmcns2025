@@ -1,8 +1,12 @@
-import streamlit as st
+import pandas as pd, os, textwrap
+
+# Build updated Streamlit app code (full)
+code = r'''import streamlit as st
 import pandas as pd
 import sqlite3
 from datetime import datetime
 import time
+import pytz
 
 # =========================
 # CONFIG
@@ -19,6 +23,9 @@ DB_NAME = "dinner.db"
 ADMIN_PIN_ENABLED = True
 ADMIN_PIN = "2025"   # tukar PIN di sini
 
+# Timezone Malaysia
+TZ = pytz.timezone("Asia/Kuala_Lumpur")
+
 # =========================
 # DB HELPERS
 # =========================
@@ -26,6 +33,11 @@ def get_conn():
     return sqlite3.connect(DB_NAME, check_same_thread=False)
 
 def init_db():
+    """
+    Nota penting:
+    - Untuk elak masalah migrate DB lama, kita kekalkan column 'gelaran' dalam DB,
+      tapi Excel TIDAK perlu ada Gelaran dan UI pun tak paparkan gelaran.
+    """
     with get_conn() as conn:
         c = conn.cursor()
         c.execute("""
@@ -57,22 +69,29 @@ def init_db():
         conn.commit()
 
 def normalize_master(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Excel template baru: Email, Nama, No_Meja
+    - 'Gelaran' adalah OPTIONAL (kalau ada, kita simpan; kalau tiada, auto kosong).
+    """
     df = df.copy()
-    # standardize column names (case/space tolerant)
     df.columns = [str(c).strip() for c in df.columns]
 
-    required = ["Email", "Nama", "Gelaran", "No_Meja"]
+    required = ["Email", "Nama", "No_Meja"]
     missing = [c for c in required if c not in df.columns]
     if missing:
         raise ValueError(f"Kolum wajib tiada: {missing}. Perlu: {required}")
 
+    if "Gelaran" not in df.columns:
+        df["Gelaran"] = ""  # auto kosong
+
     df["Email"] = df["Email"].astype(str).str.strip().str.lower()
     df["Nama"] = df["Nama"].astype(str).str.strip()
-    df["Gelaran"] = df["Gelaran"].astype(str).str.strip()
     df["No_Meja"] = df["No_Meja"].astype(str).str.strip()
+    df["Gelaran"] = df["Gelaran"].astype(str).str.strip()
+
     df = df[df["Email"].str.len() > 3]  # buang row kosong pelik
     df = df.drop_duplicates(subset=["Email"], keep="last")
-    return df[required]
+    return df[["Email", "Nama", "Gelaran", "No_Meja"]]
 
 def import_master(df: pd.DataFrame):
     df = normalize_master(df)
@@ -105,12 +124,13 @@ def already_checked_in(email: str) -> bool:
         c.execute("SELECT 1 FROM attendance WHERE email=? LIMIT 1", (email,))
         return c.fetchone() is not None
 
+def now_myt_str():
+    return datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S")
+
 def confirm_checkin(row):
     # row = (email, nama, gelaran, no_meja)
-    tz = pytz.timezone("Asia/Kuala_Lumpur")
-    now = datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
-    # micro-safety: reduce collision when ramai tekan serentak
-    time.sleep(0.15)
+    now = now_myt_str()
+    time.sleep(0.15)  # micro-safety: reduce collision when ramai tekan serentak
     with get_conn() as conn:
         c = conn.cursor()
         c.execute("""
@@ -133,11 +153,11 @@ def count_stats():
 
 def load_attendance():
     with get_conn() as conn:
-        return pd.read_sql("SELECT * FROM attendance ORDER BY timestamp DESC", conn)
+        return pd.read_sql("SELECT email, timestamp, nama, no_meja FROM attendance ORDER BY timestamp DESC", conn)
 
 def load_winners():
     with get_conn() as conn:
-        return pd.read_sql("SELECT * FROM winners ORDER BY timestamp DESC", conn)
+        return pd.read_sql("SELECT email, timestamp, nama, no_meja FROM winners ORDER BY timestamp DESC", conn)
 
 def pick_winner():
     with get_conn() as conn:
@@ -153,12 +173,12 @@ def pick_winner():
             return None, "Semua tetamu yang hadir sudah menang."
 
         row = eligible.sample(1).iloc[0]
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        now = now_myt_str()
 
         conn.execute("""
         INSERT OR IGNORE INTO winners(email, timestamp, nama, gelaran, no_meja)
         VALUES (?, ?, ?, ?, ?)
-        """, (row["email"], now, row["nama"], row["gelaran"], row["no_meja"]))
+        """, (row["email"], now, row["nama"], row.get("gelaran", ""), row["no_meja"]))
         conn.commit()
 
     return row, None
@@ -169,7 +189,6 @@ def pick_winner():
 def inject_global_css():
     st.markdown("""
     <style>
-      /* tighten top padding a bit */
       .block-container { padding-top: 1.3rem; }
 
       @keyframes popFade {
@@ -243,7 +262,6 @@ def inject_global_css():
         color: #6A4B00;
         letter-spacing: 1px;
       }
-
       @keyframes pulseMeja {
         0%, 100% { transform: scale(1); }
         50%      { transform: scale(1.06); }
@@ -256,7 +274,6 @@ def inject_global_css():
         margin-top: 6px;
         animation: pulseMeja 900ms ease-in-out 1;
       }
-
       .vip-status{
         position: relative;
         margin-top: 14px;
@@ -275,7 +292,7 @@ def inject_global_css():
     </style>
     """, unsafe_allow_html=True)
 
-def vip_card(gelaran, nama, email, meja, status_text="✔ Kehadiran Disahkan"):
+def vip_card(nama, email, meja, status_text="✔ Kehadiran Disahkan"):
     st.markdown(
         f"""
         <div class="vip-card vip-animate">
@@ -284,7 +301,7 @@ def vip_card(gelaran, nama, email, meja, status_text="✔ Kehadiran Disahkan"):
 
           <div class="vip-name">
             Selamat Datang<br>
-            {gelaran} {nama}
+            {nama}
           </div>
 
           <div class="vip-meja-box">
@@ -293,7 +310,7 @@ def vip_card(gelaran, nama, email, meja, status_text="✔ Kehadiran Disahkan"):
           </div>
 
           <div class="vip-status">{status_text}</div>
-          <div class="vip-meta">{email}</div>
+          <div class="vip-meta">{email} • MYT</div>
         </div>
         """,
         unsafe_allow_html=True
@@ -325,15 +342,13 @@ with tab1:
         if not row:
             st.error("Email tidak dijumpai dalam senarai jemputan. Sila hubungi urusetia.")
         else:
-            email_db, nama, gelaran, no_meja = row
+            email_db, nama, gelaran, no_meja = row  # gelaran masih wujud dlm DB, tapi UI tak guna
 
-            # show VIP card immediately
             if already_checked_in(email_db):
-                vip_card(gelaran, nama, email_db, no_meja, status_text="ℹ️ Rekod wujud (sudah check-in sebelum ini)")
+                vip_card(nama, email_db, no_meja, status_text="ℹ️ Rekod wujud (sudah check-in sebelum ini)")
             else:
-                vip_card(gelaran, nama, email_db, no_meja, status_text="✔ Sila sahkan kehadiran anda")
+                vip_card(nama, email_db, no_meja, status_text="✔ Sila sahkan kehadiran anda")
 
-            # Confirm button
             colA, colB = st.columns([1, 1])
             with colA:
                 confirm = st.button("✅ Confirm Check-in", use_container_width=True)
@@ -346,7 +361,6 @@ with tab1:
                 st.toast("✅ Check-in confirmed", icon="🎉")
 
             if refresh:
-                # streamlit reset: rerun will clear input
                 st.rerun()
 
 # =========================
@@ -355,7 +369,6 @@ with tab1:
 with tab2:
     st.subheader("Admin Dashboard")
 
-    # Admin PIN (optional)
     if ADMIN_PIN_ENABLED:
         if "admin_ok" not in st.session_state:
             st.session_state.admin_ok = False
@@ -372,6 +385,7 @@ with tab2:
             st.stop()
 
     with st.expander("📥 Import / Update Master List (Excel)", expanded=True):
+        st.caption("Template kolum: Email, Nama, No_Meja (Gelaran tidak diperlukan).")
         up = st.file_uploader("Upload Excel (Master)", type=["xlsx"])
         if up is not None:
             try:
@@ -412,8 +426,8 @@ with tab2:
                 st.error(err)
             else:
                 st.balloons()
-                st.success(f"PEMENANG: {winner['gelaran']} {winner['nama']}  •  Meja {winner['no_meja']}")
-                st.caption(f"Email: {winner['email']}")
+                st.success(f"PEMENANG: {winner['nama']}  •  Meja {winner['no_meja']}")
+                st.caption(f"Email: {winner['email']} • MYT")
     with col2:
         if st.button("🔄 Refresh Dashboard", use_container_width=True):
             st.rerun()
@@ -439,3 +453,19 @@ with tab2:
                     conn.commit()
                 st.success("Winners dikosongkan.")
                 st.rerun()
+'''
+app_path = "/mnt/data/app.py"
+with open(app_path, "w", encoding="utf-8") as f:
+    f.write(code)
+
+# Create Excel template
+template_df = pd.DataFrame({
+    "Email": ["nama@uitm.edu.my", "contoh2@uitm.edu.my"],
+    "Nama": ["Zahari Md Rodzi", "Tetamu Dua"],
+    "No_Meja": ["A1", "B3"]
+})
+xlsx_path = "/mnt/data/template_master.xlsx"
+template_df.to_excel(xlsx_path, index=False)
+
+(app_path, xlsx_path, os.path.getsize(app_path), os.path.getsize(xlsx_path))
+
