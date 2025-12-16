@@ -525,26 +525,54 @@ with tab2:
     att = load_attendance()
     st.dataframe(att, use_container_width=True, height=280)
 
-    with st.expander("⚠️ Maintenance", expanded=False):
-        colx, coly, colz = st.columns(3)
-        with colx:
-            if st.button("Reset Attendance", use_container_width=True):
-                with get_conn() as conn:
-                    conn.execute("DELETE FROM attendance")
-                    conn.commit()
-                st.success("Attendance dikosongkan.")
-                st.rerun()
-        with coly:
-            if st.button("Reset Winners", use_container_width=True):
-                with get_conn() as conn:
-                    conn.execute("DELETE FROM winners")
-                    conn.commit()
-                st.success("Winners dikosongkan.")
-                st.rerun()
-        with colz:
-            if st.button("Reset Table Map", use_container_width=True):
-                with get_conn() as conn:
-                    conn.execute("DELETE FROM table_map")
-                    conn.commit()
-                st.success("Table map dikosongkan.")
-                st.rerun()
+with st.expander("⚠️ Maintenance", expanded=False):
+    st.caption("Reset ini akan buang data lama dalam database. Guna bila nak mula event baru.")
+
+    col1, col2, col3, col4 = st.columns(4)
+
+    with col1:
+        if st.button("Reset MASTER", use_container_width=True):
+            with get_conn() as conn:
+                conn.execute("DELETE FROM master")
+                conn.commit()
+            st.success("MASTER dikosongkan.")
+            st.rerun()
+
+    with col2:
+        if st.button("Reset Attendance", use_container_width=True):
+            with get_conn() as conn:
+                conn.execute("DELETE FROM attendance")
+                conn.commit()
+            st.success("Attendance dikosongkan.")
+            st.rerun()
+
+    with col3:
+        if st.button("Reset Winners", use_container_width=True):
+            with get_conn() as conn:
+                conn.execute("DELETE FROM winners")
+                conn.commit()
+            st.success("Winners dikosongkan.")
+            st.rerun()
+
+    with col4:
+        if st.button("Reset Table Map", use_container_width=True):
+            with get_conn() as conn:
+                conn.execute("DELETE FROM table_map")
+                conn.commit()
+            st.success("Table map dikosongkan.")
+            st.rerun()
+
+    st.markdown("---")
+
+    # OPTIONAL: kalau nak reset SEMUA sekali (paling padu untuk event baru)
+    if st.button("🔥 Reset SEMUA (Master+Attendance+Winners+Map+Layout)", use_container_width=True):
+        with get_conn() as conn:
+            conn.execute("DELETE FROM master")
+            conn.execute("DELETE FROM attendance")
+            conn.execute("DELETE FROM winners")
+            conn.execute("DELETE FROM table_map")
+            conn.execute("DELETE FROM layout_config")
+            conn.commit()
+        st.success("SEMUA data dikosongkan. Sila upload master + layout + map semula.")
+        st.rerun()
+
