@@ -1,53 +1,42 @@
-import pandas as pd, os, textwrap
-
-# Build updated Streamlit app code (full)
-code = r'''import streamlit as st
+import streamlit as st
 import pandas as pd
 import sqlite3
 from datetime import datetime
 import time
 import pytz
+from PIL import Image, ImageDraw
+import io
 
 # =========================
 # CONFIG
 # =========================
-st.set_page_config(
-    page_title="Majlis Hari Inovasi UiTM 2025",
-    page_icon="🎫",
-    layout="centered"
-)
+st.set_page_config(page_title="Event Check-in + Layout", page_icon="🎫", layout="centered")
 
 DB_NAME = "dinner.db"
 
-# Optional: letak PIN admin (tukar ikut suka)
 ADMIN_PIN_ENABLED = True
 ADMIN_PIN = "2025"   # tukar PIN di sini
 
-# Timezone Malaysia
 TZ = pytz.timezone("Asia/Kuala_Lumpur")
 
 # =========================
-# DB HELPERS
+# DB
 # =========================
 def get_conn():
     return sqlite3.connect(DB_NAME, check_same_thread=False)
 
 def init_db():
-    """
-    Nota penting:
-    - Untuk elak masalah migrate DB lama, kita kekalkan column 'gelaran' dalam DB,
-      tapi Excel TIDAK perlu ada Gelaran dan UI pun tak paparkan gelaran.
-    """
     with get_conn() as conn:
         c = conn.cursor()
+
+        # Master + Attendance + Winners (kekal gelaran utk backward-compat, tapi UI tak guna)
         c.execute("""
         CREATE TABLE IF NOT EXISTS master (
             email TEXT PRIMARY KEY,
             nama TEXT,
             gelaran TEXT,
             no_meja TEXT
-        )
-        """)
+        )""")
         c.execute("""
         CREATE TABLE IF NOT EXISTS attendance (
             email TEXT PRIMARY KEY,
@@ -55,8 +44,7 @@ def init_db():
             nama TEXT,
             gelaran TEXT,
             no_meja TEXT
-        )
-        """)
+        )""")
         c.execute("""
         CREATE TABLE IF NOT EXISTS winners (
             email TEXT PRIMARY KEY,
@@ -64,14 +52,43 @@ def init_db():
             nama TEXT,
             gelaran TEXT,
             no_meja TEXT
-        )
-        """)
+        )""")
+
+        # Layout config (1 row sahaja)
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS layout_config (
+            id INTEGER PRIMARY KEY CHECK (id=1),
+            filename TEXT,
+            image_bytes BLOB,
+            updated_at TEXT
+        )""")
+
+        # Mapping meja -> koordinat
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS table_map (
+            no_meja TEXT PRIMARY KEY,
+            x INTEGER,
+            y INTEGER,
+            r INTEGER
+        )""")
+
         conn.commit()
 
+def now_myt_str():
+    return datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S")
+
+# =========================
+# MASTER IMPORT
+# =========================
 def normalize_master(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Excel template baru: Email, Nama, No_Meja
-    - 'Gelaran' adalah OPTIONAL (kalau ada, kita simpan; kalau tiada, auto kosong).
+    Master Excel kolum wajib:
+      - Email
+      - Nama
+      - No_Meja
+
+    Kolum optional:
+      - Gelaran (jika ada, sistem simpan; jika tiada, auto kosong)
     """
     df = df.copy()
     df.columns = [str(c).strip() for c in df.columns]
@@ -82,14 +99,14 @@ def normalize_master(df: pd.DataFrame) -> pd.DataFrame:
         raise ValueError(f"Kolum wajib tiada: {missing}. Perlu: {required}")
 
     if "Gelaran" not in df.columns:
-        df["Gelaran"] = ""  # auto kosong
+        df["Gelaran"] = ""
 
     df["Email"] = df["Email"].astype(str).str.strip().str.lower()
     df["Nama"] = df["Nama"].astype(str).str.strip()
     df["No_Meja"] = df["No_Meja"].astype(str).str.strip()
     df["Gelaran"] = df["Gelaran"].astype(str).str.strip()
 
-    df = df[df["Email"].str.len() > 3]  # buang row kosong pelik
+    df = df[df["Email"].str.len() > 3]
     df = df.drop_duplicates(subset=["Email"], keep="last")
     return df[["Email", "Nama", "Gelaran", "No_Meja"]]
 
@@ -115,8 +132,7 @@ def get_guest(email: str):
     with get_conn() as conn:
         c = conn.cursor()
         c.execute("SELECT email, nama, gelaran, no_meja FROM master WHERE email=?", (email,))
-        row = c.fetchone()
-    return row  # (email, nama, gelaran, no_meja)
+        return c.fetchone()
 
 def already_checked_in(email: str) -> bool:
     with get_conn() as conn:
@@ -124,13 +140,9 @@ def already_checked_in(email: str) -> bool:
         c.execute("SELECT 1 FROM attendance WHERE email=? LIMIT 1", (email,))
         return c.fetchone() is not None
 
-def now_myt_str():
-    return datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S")
-
 def confirm_checkin(row):
-    # row = (email, nama, gelaran, no_meja)
     now = now_myt_str()
-    time.sleep(0.15)  # micro-safety: reduce collision when ramai tekan serentak
+    time.sleep(0.12)
     with get_conn() as conn:
         c = conn.cursor()
         c.execute("""
@@ -153,56 +165,115 @@ def count_stats():
 
 def load_attendance():
     with get_conn() as conn:
-        return pd.read_sql("SELECT email, timestamp, nama, no_meja FROM attendance ORDER BY timestamp DESC", conn)
+        return pd.read_sql(
+            "SELECT email, timestamp, nama, no_meja FROM attendance ORDER BY timestamp DESC",
+            conn
+        )
 
-def load_winners():
+# =========================
+# LAYOUT + MAP
+# =========================
+def save_layout_image(filename: str, image_bytes: bytes):
     with get_conn() as conn:
-        return pd.read_sql("SELECT email, timestamp, nama, no_meja FROM winners ORDER BY timestamp DESC", conn)
-
-def pick_winner():
-    with get_conn() as conn:
-        att = pd.read_sql("SELECT * FROM attendance", conn)
-        win = pd.read_sql("SELECT * FROM winners", conn)
-
-        if att.empty:
-            return None, "Belum ada tetamu check-in."
-
-        eligible = att if win.empty else att[~att["email"].isin(win["email"])]
-
-        if eligible.empty:
-            return None, "Semua tetamu yang hadir sudah menang."
-
-        row = eligible.sample(1).iloc[0]
-        now = now_myt_str()
-
         conn.execute("""
-        INSERT OR IGNORE INTO winners(email, timestamp, nama, gelaran, no_meja)
-        VALUES (?, ?, ?, ?, ?)
-        """, (row["email"], now, row["nama"], row.get("gelaran", ""), row["no_meja"]))
+        INSERT INTO layout_config (id, filename, image_bytes, updated_at)
+        VALUES (1, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            filename=excluded.filename,
+            image_bytes=excluded.image_bytes,
+            updated_at=excluded.updated_at
+        """, (filename, image_bytes, now_myt_str()))
         conn.commit()
 
-    return row, None
+def load_layout_image_bytes():
+    with get_conn() as conn:
+        row = conn.execute("SELECT filename, image_bytes, updated_at FROM layout_config WHERE id=1").fetchone()
+    return row  # (filename, bytes, updated_at) atau None
+
+def upsert_table_map(df_map: pd.DataFrame):
+    """
+    Mapping file kolum wajib:
+      - No_Meja
+      - x
+      - y
+    Kolum optional:
+      - r (default 18)
+    """
+    df = df_map.copy()
+    df.columns = [str(c).strip() for c in df.columns]
+
+    required = ["No_Meja", "x", "y"]
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise ValueError(f"Kolum wajib tiada: {missing}. Perlu: {required}")
+
+    if "r" not in df.columns:
+        df["r"] = 18
+
+    df["No_Meja"] = df["No_Meja"].astype(str).str.strip().str.upper()
+    df["x"] = pd.to_numeric(df["x"], errors="coerce").fillna(0).astype(int)
+    df["y"] = pd.to_numeric(df["y"], errors="coerce").fillna(0).astype(int)
+    df["r"] = pd.to_numeric(df["r"], errors="coerce").fillna(18).astype(int)
+
+    df = df[df["No_Meja"].str.len() > 0]
+
+    with get_conn() as conn:
+        c = conn.cursor()
+        for _, r in df.iterrows():
+            c.execute("""
+            INSERT INTO table_map(no_meja, x, y, r)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(no_meja) DO UPDATE SET
+              x=excluded.x, y=excluded.y, r=excluded.r
+            """, (r["No_Meja"], int(r["x"]), int(r["y"]), int(r["r"])))
+        conn.commit()
+
+def get_table_pos(no_meja: str):
+    key = (no_meja or "").strip().upper()
+    if not key:
+        return None
+    with get_conn() as conn:
+        row = conn.execute("SELECT x, y, r FROM table_map WHERE no_meja=?", (key,)).fetchone()
+    return row  # (x,y,r) or None
+
+def list_mapped_tables(limit=500):
+    with get_conn() as conn:
+        df = pd.read_sql("SELECT no_meja, x, y, r FROM table_map ORDER BY no_meja ASC", conn)
+    return df.head(limit)
+
+def render_layout_with_highlight(layout_bytes: bytes, no_meja: str):
+    img = Image.open(io.BytesIO(layout_bytes)).convert("RGB")
+    draw = ImageDraw.Draw(img)
+
+    pos = get_table_pos(no_meja)
+    key = (no_meja or "").strip().upper()
+    if pos and key:
+        x, y, r = pos
+        r = max(int(r), 8)
+        # double ring
+        draw.ellipse((x-r, y-r, x+r, y+r), outline="red", width=6)
+        draw.ellipse((x-r-4, y-r-4, x+r+4, y+r+4), outline="white", width=2)
+        draw.text((x + r + 8, y - 10), f"MEJA {key}", fill="red")
+    return img
 
 # =========================
-# UI STYLES (premium + animation)
+# UI (CSS)
 # =========================
-def inject_global_css():
+def inject_css():
     st.markdown("""
     <style>
-      .block-container { padding-top: 1.3rem; }
-
+      .block-container { padding-top: 1.1rem; }
       @keyframes popFade {
-        0%   { opacity: 0; transform: translateY(14px) scale(0.98); filter: blur(2px); }
-        60%  { opacity: 1; transform: translateY(-2px) scale(1.01); filter: blur(0); }
+        0%   { opacity: 0; transform: translateY(12px) scale(0.985); filter: blur(2px); }
+        70%  { opacity: 1; transform: translateY(-2px) scale(1.01); filter: blur(0); }
         100% { opacity: 1; transform: translateY(0) scale(1); }
       }
       .vip-animate { animation: popFade 520ms ease-out both; }
-
       .vip-card {
         background: linear-gradient(135deg, #4B1F78, #6A2FA3);
         border-radius: 22px;
-        padding: 26px 22px;
-        margin-top: 16px;
+        padding: 22px 18px;
+        margin-top: 14px;
         box-shadow: 0 18px 40px rgba(0,0,0,0.25);
         color: white;
         position: relative;
@@ -224,80 +295,40 @@ def inject_global_css():
         border-radius: 18px;
         pointer-events:none;
       }
-      .vip-title{
-        position: relative;
-        text-align:center;
-        font-weight: 900;
-        letter-spacing: .6px;
-        font-size: 18px;
-      }
-      .vip-sub{
-        position: relative;
-        text-align:center;
-        font-size: 13px;
-        opacity: .92;
-        margin-top: 4px;
-      }
-      .vip-name{
-        position: relative;
-        text-align:center;
-        font-size: 20px;
-        font-weight: 800;
-        margin-top: 16px;
-        line-height: 1.2;
-      }
+      .vip-title{ position: relative; text-align:center; font-weight: 900; font-size: 18px; }
+      .vip-sub{ position: relative; text-align:center; font-size: 13px; opacity: .92; margin-top: 4px; }
+      .vip-name{ position: relative; text-align:center; font-size: 20px; font-weight: 800; margin-top: 14px; }
       .vip-meja-box{
         position: relative;
         background: linear-gradient(180deg, #FFF7E6, #ffffff);
         border-radius: 18px;
-        padding: 18px 14px;
+        padding: 16px 12px;
         text-align:center;
-        margin: 16px auto 0;
+        margin: 14px auto 0;
         width: min(520px, 92%);
         box-shadow: inset 0 0 0 2px rgba(201,162,39,.95);
       }
-      .vip-meja-label{
-        font-size: 12px;
-        font-weight: 900;
-        color: #6A4B00;
-        letter-spacing: 1px;
-      }
-      @keyframes pulseMeja {
-        0%, 100% { transform: scale(1); }
-        50%      { transform: scale(1.06); }
-      }
+      .vip-meja-label{ font-size: 12px; font-weight: 900; color: #6A4B00; letter-spacing: 1px; }
+      @keyframes pulseMeja { 0%,100% { transform: scale(1); } 50% { transform: scale(1.06); } }
       .vip-meja-no{
-        font-size: 64px;
+        font-size: 58px;
         font-weight: 950;
         color: #4B1F78;
         line-height: 1;
         margin-top: 6px;
         animation: pulseMeja 900ms ease-in-out 1;
       }
-      .vip-status{
-        position: relative;
-        margin-top: 14px;
-        text-align:center;
-        font-size: 14px;
-        font-weight: 900;
-        color: #D1FAE5;
-      }
-      .vip-meta{
-        position: relative;
-        margin-top: 10px;
-        text-align:center;
-        font-size: 12px;
-        opacity:.9;
-      }
+      .vip-status{ position: relative; margin-top: 12px; text-align:center; font-size: 14px; font-weight: 900; color: #D1FAE5; }
+      .vip-meta{ position: relative; margin-top: 8px; text-align:center; font-size: 12px; opacity:.9; }
     </style>
     """, unsafe_allow_html=True)
 
-def vip_card(nama, email, meja, status_text="✔ Kehadiran Disahkan"):
+def vip_card(nama, email, meja, status_text):
     st.markdown(
         f"""
         <div class="vip-card vip-animate">
-          <div class="vip-title">🎓 MAJLIS HARI INOVASI UiTM 2025</div>
-          <div class="vip-sub">Tema: Nusantara • 18 Disember 2025</div>
+          <div class="vip-title">🎓 EVENT CHECK-IN</div>
+          <div class="vip-sub">Paparan Meja + Layout • MYT</div>
 
           <div class="vip-name">
             Selamat Datang<br>
@@ -317,37 +348,33 @@ def vip_card(nama, email, meja, status_text="✔ Kehadiran Disahkan"):
     )
 
 # =========================
-# APP START
+# APP
 # =========================
 init_db()
-inject_global_css()
+inject_css()
 
-st.title("🎫 Majlis Hari Inovasi UiTM 2025")
-st.caption("Check-in Digital • Email → Papar Nombor Meja • Tema Nusantara")
+st.title("🎫 Sistem Check-in + Layout Meja")
+st.caption("Admin upload Excel tetamu + gambar layout + mapping koordinat → Tetamu terus nampak meja & lokasi.")
 
-tab1, tab2 = st.tabs(["✅ Check-in Tetamu", "🛠️ Admin Dashboard"])
+tab1, tab2 = st.tabs(["✅ Check-in Tetamu", "🛠️ Admin (Setup Event)"])
 
-# =========================
-# TAB 1: CHECK-IN
-# =========================
+# -------- TAB 1: CHECK-IN --------
 with tab1:
     st.subheader("Semakan Kehadiran Tetamu")
-    email = st.text_input(
-        "Masukkan Email Jemputan",
-        placeholder="contoh: zahari@uitm.edu.my"
-    ).strip().lower()
+
+    email = st.text_input("Masukkan Email Jemputan", placeholder="contoh: nama@uitm.edu.my").strip().lower()
 
     if email:
         row = get_guest(email)
         if not row:
             st.error("Email tidak dijumpai dalam senarai jemputan. Sila hubungi urusetia.")
         else:
-            email_db, nama, gelaran, no_meja = row  # gelaran masih wujud dlm DB, tapi UI tak guna
+            email_db, nama, gelaran, no_meja = row
 
             if already_checked_in(email_db):
-                vip_card(nama, email_db, no_meja, status_text="ℹ️ Rekod wujud (sudah check-in sebelum ini)")
+                vip_card(nama, email_db, no_meja, "ℹ️ Rekod wujud (sudah check-in sebelum ini)")
             else:
-                vip_card(nama, email_db, no_meja, status_text="✔ Sila sahkan kehadiran anda")
+                vip_card(nama, email_db, no_meja, "✔ Sila sahkan kehadiran anda")
 
             colA, colB = st.columns([1, 1])
             with colA:
@@ -360,15 +387,30 @@ with tab1:
                 st.success("Check-in berjaya direkod. Terima kasih!")
                 st.toast("✅ Check-in confirmed", icon="🎉")
 
+            # Papar layout + highlight
+            layout_row = load_layout_image_bytes()
+            if layout_row:
+                filename, layout_bytes, updated_at = layout_row
+                if layout_bytes:
+                    img_h = render_layout_with_highlight(layout_bytes, no_meja)
+                    st.image(img_h, use_container_width=True, caption=f"Lokasi Meja {no_meja} (Layout: {filename})")
+                else:
+                    st.info("Layout disimpan tetapi tiada data imej. Admin perlu upload semula.")
+            else:
+                st.info("Layout belum diset. Admin perlu upload gambar layout & mapping dahulu.")
+
+            # Warn kalau meja belum ada mapping
+            if not get_table_pos(no_meja):
+                st.warning(f"Mapping koordinat untuk meja {no_meja} belum ada. Admin perlu tambah dalam Table Map.")
+
             if refresh:
                 st.rerun()
 
-# =========================
-# TAB 2: ADMIN
-# =========================
+# -------- TAB 2: ADMIN --------
 with tab2:
-    st.subheader("Admin Dashboard")
+    st.subheader("Admin (Setup Event)")
 
+    # PIN lock
     if ADMIN_PIN_ENABLED:
         if "admin_ok" not in st.session_state:
             st.session_state.admin_ok = False
@@ -384,88 +426,125 @@ with tab2:
                     st.error("PIN salah.")
             st.stop()
 
-    with st.expander("📥 Import / Update Master List (Excel)", expanded=True):
-        st.caption("Template kolum: Email, Nama, No_Meja (Gelaran tidak diperlukan).")
-        up = st.file_uploader("Upload Excel (Master)", type=["xlsx"])
-        if up is not None:
-            try:
-                df = pd.read_excel(up)
-                import_master(df)
-                st.success("Master list berjaya diimport / dikemaskini.")
-            except Exception as e:
-                st.error(f"Gagal import: {e}")
+    st.markdown("### 1) Upload Master List Tetamu (Excel)")
+    st.caption("Kolum wajib: Email, Nama, No_Meja. (Gelaran tak perlu)")
+    up_master = st.file_uploader("Upload Excel (Master)", type=["xlsx"], key="master_upl")
+    if up_master is not None:
+        try:
+            df = pd.read_excel(up_master)
+            import_master(df)
+            st.success("Master list berjaya diimport / dikemaskini.")
+        except Exception as e:
+            st.error(f"Gagal import master: {e}")
 
+    st.markdown("---")
+    st.markdown("### 2) Upload Layout Image (JPG/PNG)")
+    up_img = st.file_uploader("Upload Layout Image", type=["jpg", "jpeg", "png"], key="layout_upl")
+    if up_img is not None:
+        try:
+            img_bytes = up_img.read()
+            save_layout_image(up_img.name, img_bytes)
+            st.success("Layout image berjaya disimpan.")
+            st.image(Image.open(io.BytesIO(img_bytes)), use_container_width=True, caption=f"Preview: {up_img.name}")
+        except Exception as e:
+            st.error(f"Gagal simpan layout: {e}")
+
+    layout_row = load_layout_image_bytes()
+    if layout_row:
+        fn, _, upd = layout_row
+        st.caption(f"Layout semasa: {fn} • last update: {upd} (MYT)")
+
+    st.markdown("---")
+    st.markdown("### 3) Upload Table Map (Koordinat Meja)")
+    st.caption("Fail CSV/XLSX dengan kolum: No_Meja, x, y, (optional r). Contoh: A1, 610, 390, 18")
+
+    map_choice = st.radio("Format mapping", ["CSV", "Excel (XLSX)"], horizontal=True)
+    if map_choice == "CSV":
+        up_map = st.file_uploader("Upload Mapping CSV", type=["csv"], key="map_csv")
+        if up_map is not None:
+            try:
+                dfm = pd.read_csv(up_map)
+                upsert_table_map(dfm)
+                st.success("Table map berjaya diimport / dikemaskini.")
+            except Exception as e:
+                st.error(f"Gagal import mapping: {e}")
+    else:
+        up_map = st.file_uploader("Upload Mapping Excel", type=["xlsx"], key="map_xlsx")
+        if up_map is not None:
+            try:
+                dfm = pd.read_excel(up_map)
+                upsert_table_map(dfm)
+                st.success("Table map berjaya diimport / dikemaskini.")
+            except Exception as e:
+                st.error(f"Gagal import mapping: {e}")
+
+    st.markdown("### 4) Tambah / Edit 1 Meja (Manual)")
+    with st.form("add_one_map"):
+        c1, c2, c3, c4 = st.columns([1.2, 1, 1, 1])
+        with c1:
+            meja_in = st.text_input("No_Meja", placeholder="A1 / VIP1 / AJK1")
+        with c2:
+            x_in = st.number_input("x", min_value=0, max_value=10000, value=0, step=1)
+        with c3:
+            y_in = st.number_input("y", min_value=0, max_value=10000, value=0, step=1)
+        with c4:
+            r_in = st.number_input("r", min_value=5, max_value=200, value=18, step=1)
+
+        save_one = st.form_submit_button("💾 Save Mapping")
+        if save_one:
+            try:
+                df_one = pd.DataFrame([{"No_Meja": meja_in, "x": x_in, "y": y_in, "r": r_in}])
+                upsert_table_map(df_one)
+                st.success(f"Mapping {meja_in.strip().upper()} disimpan.")
+            except Exception as e:
+                st.error(f"Gagal simpan mapping: {e}")
+
+    st.markdown("---")
+    st.markdown("### 5) Preview Highlight (Test)")
+    df_map_show = list_mapped_tables()
+    st.dataframe(df_map_show, use_container_width=True, height=240)
+
+    if layout_row and layout_row[1]:
+        test_meja = st.text_input("Test No_Meja untuk highlight", placeholder="contoh: A1").strip().upper()
+        if test_meja:
+            img_test = render_layout_with_highlight(layout_row[1], test_meja)
+            st.image(img_test, use_container_width=True, caption=f"Preview highlight: {test_meja}")
+            if not get_table_pos(test_meja):
+                st.warning("Meja ini belum ada mapping.")
+    else:
+        st.info("Upload layout image dahulu untuk preview highlight.")
+
+    st.markdown("---")
     total, hadir, belum = count_stats()
     c1, c2, c3 = st.columns(3)
     c1.metric("Total Jemputan", total)
     c2.metric("Dah Check-in", hadir)
     c3.metric("Belum Hadir", belum)
 
-    st.markdown("---")
-
     st.write("### 📋 Senarai Kehadiran (Real-time)")
     att = load_attendance()
     st.dataframe(att, use_container_width=True, height=280)
 
-    st.download_button(
-        "⬇️ Download Attendance (CSV)",
-        data=att.to_csv(index=False).encode("utf-8"),
-        file_name="attendance.csv",
-        mime="text/csv",
-        use_container_width=True
-    )
-
-    st.markdown("---")
-
-    st.write("### 🎁 Cabutan Bertuah")
-    col1, col2 = st.columns([1, 1])
-    with col1:
-        if st.button("🎲 Pick Winner", use_container_width=True):
-            winner, err = pick_winner()
-            if err:
-                st.error(err)
-            else:
-                st.balloons()
-                st.success(f"PEMENANG: {winner['nama']}  •  Meja {winner['no_meja']}")
-                st.caption(f"Email: {winner['email']} • MYT")
-    with col2:
-        if st.button("🔄 Refresh Dashboard", use_container_width=True):
-            st.rerun()
-
-    st.write("#### Winners Log")
-    win = load_winners()
-    st.dataframe(win, use_container_width=True, height=220)
-
     with st.expander("⚠️ Maintenance", expanded=False):
-        st.caption("Gunakan hanya jika perlu (contoh: sebelum event test).")
-        colx, coly = st.columns(2)
+        colx, coly, colz = st.columns(3)
         with colx:
-            if st.button("Reset Attendance (kosongkan)", use_container_width=True):
+            if st.button("Reset Attendance", use_container_width=True):
                 with get_conn() as conn:
                     conn.execute("DELETE FROM attendance")
                     conn.commit()
                 st.success("Attendance dikosongkan.")
                 st.rerun()
         with coly:
-            if st.button("Reset Winners (kosongkan)", use_container_width=True):
+            if st.button("Reset Winners", use_container_width=True):
                 with get_conn() as conn:
                     conn.execute("DELETE FROM winners")
                     conn.commit()
                 st.success("Winners dikosongkan.")
                 st.rerun()
-'''
-app_path = "/mnt/data/app.py"
-with open(app_path, "w", encoding="utf-8") as f:
-    f.write(code)
-
-# Create Excel template
-template_df = pd.DataFrame({
-    "Email": ["nama@uitm.edu.my", "contoh2@uitm.edu.my"],
-    "Nama": ["Zahari Md Rodzi", "Tetamu Dua"],
-    "No_Meja": ["A1", "B3"]
-})
-xlsx_path = "/mnt/data/template_master.xlsx"
-template_df.to_excel(xlsx_path, index=False)
-
-(app_path, xlsx_path, os.path.getsize(app_path), os.path.getsize(xlsx_path))
-
+        with colz:
+            if st.button("Reset Table Map", use_container_width=True):
+                with get_conn() as conn:
+                    conn.execute("DELETE FROM table_map")
+                    conn.commit()
+                st.success("Table map dikosongkan.")
+                st.rerun()
