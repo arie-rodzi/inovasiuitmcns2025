@@ -84,7 +84,7 @@ def init_db():
             r INTEGER
         )""")
 
-        # NOTE: kita akan migrate schema dalam migrate_event_assets_schema()
+        # minimal table; schema penuh akan dimigrate
         c.execute("""
         CREATE TABLE IF NOT EXISTS event_assets (
             id INTEGER PRIMARY KEY
@@ -109,7 +109,6 @@ def migrate_event_assets_schema():
     }
 
     with get_conn() as conn:
-        # ensure table exists minimally
         conn.execute("""
         CREATE TABLE IF NOT EXISTS event_assets (
             id INTEGER PRIMARY KEY,
@@ -128,7 +127,6 @@ def migrate_event_assets_schema():
             if col not in existing:
                 conn.execute(f"ALTER TABLE event_assets ADD COLUMN {col} {typ}")
 
-        # ensure id=1 exists
         conn.execute("""
             INSERT OR IGNORE INTO event_assets (id, updated_at)
             VALUES (1, ?)
@@ -334,6 +332,12 @@ def render_layout_with_highlight(layout_bytes: bytes, no_meja: str):
 # UI (CSS)
 # =========================
 def inject_css():
+    # LOCK ZOOM for mobile (laptop still can zoom via browser)
+    st.markdown(
+        '<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">',
+        unsafe_allow_html=True
+    )
+
     st.markdown("""
     <style>
       .block-container { padding-top: 1.1rem; }
@@ -402,7 +406,7 @@ def vip_card(nama, email, meja, status_text):
         f"""
         <div class="vip-card vip-animate">
           <div class="vip-title">🎓 EVENT CHECK-IN</div>
-          <div class="vip-sub">Paparan Meja + Layout • MYT</div>
+          <div class="vip-sub">Paparan Meja + Layout</div>
 
           <div class="vip-name">
             Selamat Datang<br>
@@ -415,7 +419,7 @@ def vip_card(nama, email, meja, status_text):
           </div>
 
           <div class="vip-status">{status_text}</div>
-          <div class="vip-meta">{email} • MYT</div>
+          <div class="vip-meta">{email}</div>
         </div>
         """,
         unsafe_allow_html=True
@@ -429,31 +433,30 @@ init_db()
 migrate_event_assets_schema()
 inject_css()
 
-st.title("🎫 Sistem Check-in")
-st.caption("Flow: Poster → Check-in → Layout → Aturcara. Admin upload: XLSX + Poster + Layout + Aturcara.")
+st.title("🎫 Sistem Check-in Majlis")
 
 tab1, tab2 = st.tabs(["✅ Check-in", "🛠️ Admin"])
 
 
 # =========================================================
-# TAB 1: CHECK-IN
+# TAB 1: CHECK-IN (Poster → Check-in → Layout → Aturcara)
 # =========================================================
 with tab1:
-    # 1) POSTER (atas sekali, sentiasa keluar)
-    poster_fn, poster_bytes, _ = get_asset_bytes("poster")
+    # Poster (atas sekali)
+    _, poster_bytes, _ = get_asset_bytes("poster")
     if poster_bytes:
         try:
             st.image(Image.open(io.BytesIO(poster_bytes)), use_container_width=True)
         except Exception:
-            st.warning("Poster ada dalam DB tetapi gagal dibaca. Admin upload semula.")
+            st.warning("Poster gagal dibaca. Admin upload semula.")
     else:
-        st.info("Poster belum dimasukkan. (Admin perlu upload poster)")
+        st.info("Poster belum dimasukkan.")
 
     st.markdown("---")
 
-    # 2) CHECK-IN
+    # Check-in
     st.subheader("Semakan Kehadiran Tetamu")
-    email = st.text_input("Masukkan Email Jemputan", placeholder="contoh: nama@uitm.edu.my")
+    email = st.text_input("Masukkan Email Jemputan", placeholder="contoh: zahari@uitm.edu.my")
     email = norm_email(email)
 
     if email:
@@ -465,7 +468,7 @@ with tab1:
             no_meja = norm_meja(no_meja)
 
             if already_checked_in(email_db):
-                vip_card(nama, email_db, no_meja, "ℹ️ Rekod wujud (sudah check-in sebelum ini)")
+                vip_card(nama, email_db, no_meja, "ℹ️ Rekod wujud (sudah check-in)")
             else:
                 vip_card(nama, email_db, no_meja, "✔ Sila sahkan kehadiran anda")
 
@@ -480,45 +483,51 @@ with tab1:
                 st.success("Check-in berjaya direkod. Terima kasih!")
                 st.toast("✅ Check-in confirmed", icon="🎉")
 
-            # 3) LAYOUT (lepas check-in)
+            # Layout
             st.markdown("---")
             st.subheader("🗺️ Layout Meja")
 
-            layout_fn, layout_bytes, _ = get_asset_bytes("layout")
+            _, layout_bytes, _ = get_asset_bytes("layout")
             if layout_bytes:
                 try:
                     img_h = render_layout_with_highlight(layout_bytes, no_meja)
-                    st.image(img_h, use_container_width=True, caption=f"Lokasi Meja {no_meja} (Layout: {layout_fn})")
+                    st.image(img_h, use_container_width=True, caption=f"Lokasi Meja {no_meja}")
                 except Exception:
-                    st.warning("Layout ada dalam DB tetapi gagal dibaca. Admin upload semula.")
+                    st.warning("Layout gagal dibaca. Admin upload semula.")
             else:
-                st.info("Layout belum diset. (Admin perlu upload layout)")
+                st.info("Layout belum dimasukkan.")
 
             if not get_table_pos(no_meja):
-                st.warning(f"Mapping koordinat untuk meja {no_meja} belum ada. Admin perlu tambah dalam Table Map.")
+                st.warning(f"Koordinat meja {no_meja} belum ada. (Admin perlu tambah mapping)")
 
-            # 4) ATURCARA (lepas layout)
+            # Aturcara
             st.markdown("---")
             st.subheader("📌 Aturcara")
 
-            atur_fn, atur_bytes, _ = get_asset_bytes("aturcara")
+            _, atur_bytes, _ = get_asset_bytes("aturcara")
             if atur_bytes:
                 try:
-                    st.image(Image.open(io.BytesIO(atur_bytes)), use_container_width=True, caption=atur_fn)
+                    st.image(Image.open(io.BytesIO(atur_bytes)), use_container_width=True)
                 except Exception:
-                    st.warning("Aturcara ada dalam DB tetapi gagal dibaca. Admin upload semula.")
+                    st.warning("Aturcara gagal dibaca. Admin upload semula.")
             else:
-                st.info("Aturcara belum dimasukkan. (Admin perlu upload aturcara)")
+                st.info("Aturcara belum dimasukkan.")
 
             if refresh:
                 st.rerun()
 
+    # credit halus
+    st.markdown(
+        "<div style='text-align:center; opacity:0.55; font-size:12px; margin-top:10px;'>Built by Dr Zahari Md Rodzi</div>",
+        unsafe_allow_html=True
+    )
+
 
 # =========================================================
-# TAB 2: ADMIN (Upload semua)
+# TAB 2: ADMIN (Upload semua 4 file)
 # =========================================================
 with tab2:
-    st.subheader("Admin (Upload Semua)")
+    st.subheader("Admin")
 
     # PIN lock
     if ADMIN_PIN_ENABLED:
@@ -537,8 +546,7 @@ with tab2:
             st.stop()
 
     # 1) Master XLSX
-    st.markdown("### 1) Upload Master List Tetamu (Excel)")
-    st.caption("Kolum wajib: Email, Nama, No_Meja. (Gelaran optional)")
+    st.markdown("### 1) Upload Master List (Excel)")
     up_master = st.file_uploader("Upload Excel (Master)", type=["xlsx"], key="master_upl")
     if up_master is not None:
         try:
@@ -550,66 +558,62 @@ with tab2:
 
     st.markdown("---")
 
-    # 2) Poster image
+    # 2) Poster
     st.markdown("### 2) Upload Poster (PNG/JPG)")
     up_poster = st.file_uploader("Upload Poster", type=["png", "jpg", "jpeg"], key="poster_upl")
     if up_poster is not None:
         try:
             data = up_poster.read()
             save_asset("poster", up_poster.name, data)
-            st.success("Poster disimpan dalam DB.")
-            st.image(Image.open(io.BytesIO(data)), use_container_width=True, caption=f"Poster: {up_poster.name}")
+            st.success("Poster disimpan.")
+            st.image(Image.open(io.BytesIO(data)), use_container_width=True)
         except Exception as e:
             st.error(f"Gagal simpan poster: {e}")
 
     st.markdown("---")
 
-    # 3) Layout image
+    # 3) Layout
     st.markdown("### 3) Upload Layout (PNG/JPG)")
     up_layout = st.file_uploader("Upload Layout", type=["png", "jpg", "jpeg"], key="layout_upl")
     if up_layout is not None:
         try:
             data = up_layout.read()
             save_asset("layout", up_layout.name, data)
-            st.success("Layout disimpan dalam DB.")
-            st.image(Image.open(io.BytesIO(data)), use_container_width=True, caption=f"Layout: {up_layout.name}")
+            st.success("Layout disimpan.")
+            st.image(Image.open(io.BytesIO(data)), use_container_width=True)
         except Exception as e:
             st.error(f"Gagal simpan layout: {e}")
 
     st.markdown("---")
 
-    # 4) Aturcara image
+    # 4) Aturcara
     st.markdown("### 4) Upload Aturcara (PNG/JPG)")
     up_atur = st.file_uploader("Upload Aturcara", type=["png", "jpg", "jpeg"], key="aturcara_upl")
     if up_atur is not None:
         try:
             data = up_atur.read()
             save_asset("aturcara", up_atur.name, data)
-            st.success("Aturcara disimpan dalam DB.")
-            st.image(Image.open(io.BytesIO(data)), use_container_width=True, caption=f"Aturcara: {up_atur.name}")
+            st.success("Aturcara disimpan.")
+            st.image(Image.open(io.BytesIO(data)), use_container_width=True)
         except Exception as e:
             st.error(f"Gagal simpan aturcara: {e}")
 
-    # Status assets
+    # Status ringkas tanpa nama fail
     st.markdown("---")
-    st.markdown("### ✅ Status Assets (DB)")
+    st.markdown("### ✅ Status Upload")
     assets = load_assets()
     if assets:
-        poster_fn, poster_by, layout_fn, layout_by, atur_fn, atur_by, upd = assets
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Poster", "OK" if poster_by else "—")
-        c2.metric("Layout", "OK" if layout_by else "—")
-        c3.metric("Aturcara", "OK" if atur_by else "—")
-        c4.metric("Updated", upd if upd else "—")
-        st.caption(f"Poster: {poster_fn or '-'} | Layout: {layout_fn or '-'} | Aturcara: {atur_fn or '-'}")
+        _, poster_by, _, layout_by, _, atur_by, _ = assets
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Poster", "✅" if poster_by else "—")
+        c2.metric("Layout", "✅" if layout_by else "—")
+        c3.metric("Aturcara", "✅" if atur_by else "—")
     else:
         st.info("Belum ada assets disimpan.")
 
-    # 5) Table Map upload
+    # 5) Mapping
     st.markdown("---")
     st.markdown("### 5) Upload Table Map (Koordinat Meja)")
-    st.caption("Fail CSV/XLSX dengan kolum: No_Meja, x, y, (optional r). Contoh: A1, 610, 390, 18")
-
     map_choice = st.radio("Format mapping", ["CSV", "Excel (XLSX)"], horizontal=True)
     if map_choice == "CSV":
         up_map = st.file_uploader("Upload Mapping CSV", type=["csv"], key="map_csv")
@@ -656,26 +660,24 @@ with tab2:
     df_map_show = list_mapped_tables()
     st.dataframe(df_map_show, use_container_width=True, height=240)
 
-    layout_fn, layout_bytes, _ = get_asset_bytes("layout")
+    _, layout_bytes, _ = get_asset_bytes("layout")
     if layout_bytes:
         test_meja = st.text_input("Test No_Meja untuk highlight", placeholder="contoh: A1")
         test_meja = norm_meja(test_meja)
         if test_meja:
             img_test = render_layout_with_highlight(layout_bytes, test_meja)
-            st.image(img_test, use_container_width=True, caption=f"Preview highlight: {test_meja} (Layout: {layout_fn})")
+            st.image(img_test, use_container_width=True, caption=f"Preview meja {test_meja}")
             if not get_table_pos(test_meja):
                 st.warning("Meja ini belum ada mapping.")
-    else:
-        st.info("Upload layout dahulu untuk preview highlight.")
 
     st.markdown("---")
     total, hadir, belum = count_stats()
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Total Jemputan", total)
-    c2.metric("Dah Check-in", hadir)
-    c3.metric("Belum Hadir", belum)
+    a, b, c = st.columns(3)
+    a.metric("Total Jemputan", total)
+    b.metric("Dah Check-in", hadir)
+    c.metric("Belum Hadir", belum)
 
-    st.write("### 📋 Senarai Kehadiran (Real-time)")
+    st.write("### 📋 Senarai Kehadiran")
     att = load_attendance()
     st.dataframe(att, use_container_width=True, height=280)
 
@@ -684,7 +686,7 @@ with tab2:
 # MAINTENANCE (GLOBAL)
 # =========================================================
 with st.expander("⚠️ Maintenance", expanded=False):
-    st.caption("Reset ini akan buang data lama dalam database. Guna bila nak mula event baru.")
+    st.caption("Reset untuk kosongkan data (guna bila mula event baru).")
 
     col1, col2, col3, col4, col5 = st.columns(5)
 
@@ -723,20 +725,34 @@ with st.expander("⚠️ Maintenance", expanded=False):
     with col5:
         if st.button("Reset Assets", use_container_width=True):
             with get_conn() as conn:
-                conn.execute("UPDATE event_assets SET poster_filename=NULL, poster_bytes=NULL, layout_filename=NULL, layout_bytes=NULL, aturcara_filename=NULL, aturcara_bytes=NULL, updated_at=? WHERE id=1", (now_myt_str(),))
+                conn.execute("""
+                    UPDATE event_assets
+                    SET poster_filename=NULL, poster_bytes=NULL,
+                        layout_filename=NULL, layout_bytes=NULL,
+                        aturcara_filename=NULL, aturcara_bytes=NULL,
+                        updated_at=?
+                    WHERE id=1
+                """, (now_myt_str(),))
                 conn.commit()
-            st.success("Assets (Poster/Layout/Aturcara) dikosongkan.")
+            st.success("Assets dikosongkan.")
             st.rerun()
 
     st.markdown("---")
 
-    if st.button("🔥 Reset SEMUA (Master+Attendance+Winners+Map+Assets)", use_container_width=True):
+    if st.button("🔥 Reset SEMUA", use_container_width=True):
         with get_conn() as conn:
             conn.execute("DELETE FROM master")
             conn.execute("DELETE FROM attendance")
             conn.execute("DELETE FROM winners")
             conn.execute("DELETE FROM table_map")
-            conn.execute("UPDATE event_assets SET poster_filename=NULL, poster_bytes=NULL, layout_filename=NULL, layout_bytes=NULL, aturcara_filename=NULL, aturcara_bytes=NULL, updated_at=? WHERE id=1", (now_myt_str(),))
+            conn.execute("""
+                UPDATE event_assets
+                SET poster_filename=NULL, poster_bytes=NULL,
+                    layout_filename=NULL, layout_bytes=NULL,
+                    aturcara_filename=NULL, aturcara_bytes=NULL,
+                    updated_at=?
+                WHERE id=1
+            """, (now_myt_str(),))
             conn.commit()
-        st.success("SEMUA data dikosongkan. Sila upload master + poster + layout + aturcara + map semula.")
+        st.success("SEMUA data dikosongkan. Upload semula master + 3 gambar + mapping.")
         st.rerun()
