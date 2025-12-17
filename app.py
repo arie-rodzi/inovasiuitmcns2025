@@ -516,12 +516,7 @@ with tab1:
             if refresh:
                 st.rerun()
 
-    # credit halus
-    st.markdown(
-        "<div style='text-align:center; opacity:0.55; font-size:12px; margin-top:10px;'>Built by Dr Zahari Md Rodzi</div>",
-        unsafe_allow_html=True
-    )
-
+ 
 
 # =========================================================
 # TAB 2: ADMIN (Upload semua 4 file)
