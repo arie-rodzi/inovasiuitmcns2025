@@ -3,4 +3,4 @@ pandas
 openpyxl
 pytz
 pillow
-
+pymupdf
