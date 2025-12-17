@@ -20,17 +20,12 @@ ADMIN_PIN = "2025"   # tukar PIN di sini
 
 TZ = pytz.timezone("Asia/Kuala_Lumpur")
 
+
 # =========================
-# HELPERS: NORMALIZE KEY
+# HELPERS: NORMALIZE
 # =========================
 def norm_meja(v) -> str:
-    """
-    Normalisasi No_Meja supaya 1 keyword konsisten untuk jemputan & koordinat.
-    - strip
-    - upper
-    - buang ruang berganda
-    - buang ruang di tengah (VIP 1 -> VIP1)
-    """
+    """Normalisasi No_Meja supaya match jemputan & koordinat (VIP 1 -> VIP1)."""
     if v is None:
         return ""
     s = str(v).strip().upper()
@@ -44,6 +39,7 @@ def norm_email(v) -> str:
 def now_myt_str():
     return datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S")
 
+
 # =========================
 # DB
 # =========================
@@ -54,7 +50,6 @@ def init_db():
     with get_conn() as conn:
         c = conn.cursor()
 
-        # Master + Attendance + Winners
         c.execute("""
         CREATE TABLE IF NOT EXISTS master (
             email TEXT PRIMARY KEY,
@@ -81,7 +76,6 @@ def init_db():
             no_meja TEXT
         )""")
 
-        # Mapping meja -> koordinat (SAMA KEYWORD no_meja)
         c.execute("""
         CREATE TABLE IF NOT EXISTS table_map (
             no_meja TEXT PRIMARY KEY,
@@ -90,10 +84,35 @@ def init_db():
             r INTEGER
         )""")
 
-        # 3 gambar: poster + layout + aturcara (1 row sahaja)
+        # NOTE: kita akan migrate schema dalam migrate_event_assets_schema()
         c.execute("""
         CREATE TABLE IF NOT EXISTS event_assets (
-            id INTEGER PRIMARY KEY CHECK (id=1),
+            id INTEGER PRIMARY KEY
+        )
+        """)
+
+        conn.commit()
+
+def migrate_event_assets_schema():
+    """
+    Auto-migrate table event_assets supaya tak crash bila DB lama.
+    Pastikan kolum untuk poster/layout/aturcara wujud, dan row id=1 wujud.
+    """
+    cols = {
+        "poster_filename": "TEXT",
+        "poster_bytes": "BLOB",
+        "layout_filename": "TEXT",
+        "layout_bytes": "BLOB",
+        "aturcara_filename": "TEXT",
+        "aturcara_bytes": "BLOB",
+        "updated_at": "TEXT",
+    }
+
+    with get_conn() as conn:
+        # ensure table exists minimally
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS event_assets (
+            id INTEGER PRIMARY KEY,
             poster_filename TEXT,
             poster_bytes BLOB,
             layout_filename TEXT,
@@ -101,9 +120,22 @@ def init_db():
             aturcara_filename TEXT,
             aturcara_bytes BLOB,
             updated_at TEXT
-        )""")
+        )
+        """)
+
+        existing = [r[1] for r in conn.execute("PRAGMA table_info(event_assets)").fetchall()]
+        for col, typ in cols.items():
+            if col not in existing:
+                conn.execute(f"ALTER TABLE event_assets ADD COLUMN {col} {typ}")
+
+        # ensure id=1 exists
+        conn.execute("""
+            INSERT OR IGNORE INTO event_assets (id, updated_at)
+            VALUES (1, ?)
+        """, (now_myt_str(),))
 
         conn.commit()
+
 
 # =========================
 # ASSETS (Poster/Layout/Aturcara) in DB
@@ -120,12 +152,11 @@ def save_asset(kind: str, filename: str, data: bytes):
 
     with get_conn() as conn:
         conn.execute(f"""
-            INSERT INTO event_assets (id, {col_fn}, {col_by}, updated_at)
-            VALUES (1, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET
-              {col_fn}=excluded.{col_fn},
-              {col_by}=excluded.{col_by},
-              updated_at=excluded.updated_at
+            UPDATE event_assets
+            SET {col_fn} = ?,
+                {col_by} = ?,
+                updated_at = ?
+            WHERE id = 1
         """, (filename, data, now_myt_str()))
         conn.commit()
 
@@ -154,18 +185,11 @@ def get_asset_bytes(kind: str):
         return (atur_fn, atur_by, upd)
     return (None, None, upd)
 
+
 # =========================
 # MASTER IMPORT
 # =========================
 def normalize_master(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Master Excel kolum wajib:
-      - Email
-      - Nama
-      - No_Meja
-    Kolum optional:
-      - Gelaran
-    """
     df = df.copy()
     df.columns = [str(c).strip() for c in df.columns]
 
@@ -206,27 +230,22 @@ def get_guest(email: str):
     if not email:
         return None
     with get_conn() as conn:
-        c = conn.cursor()
-        c.execute("SELECT email, nama, gelaran, no_meja FROM master WHERE email=?", (email,))
-        row = c.fetchone()
+        row = conn.execute("SELECT email, nama, gelaran, no_meja FROM master WHERE email=?", (email,)).fetchone()
     if not row:
         return None
     return (row[0], row[1], row[2], norm_meja(row[3]))
 
 def already_checked_in(email: str) -> bool:
     with get_conn() as conn:
-        c = conn.cursor()
-        c.execute("SELECT 1 FROM attendance WHERE email=? LIMIT 1", (email,))
-        return c.fetchone() is not None
+        return conn.execute("SELECT 1 FROM attendance WHERE email=? LIMIT 1", (email,)).fetchone() is not None
 
 def confirm_checkin(row):
     now = now_myt_str()
-    time.sleep(0.12)
+    time.sleep(0.10)
     email, nama, gelaran, no_meja = row
     no_meja = norm_meja(no_meja)
     with get_conn() as conn:
-        c = conn.cursor()
-        c.execute("""
+        conn.execute("""
         INSERT INTO attendance(email, timestamp, nama, gelaran, no_meja)
         VALUES (?, ?, ?, ?, ?)
         ON CONFLICT(email) DO UPDATE SET
@@ -239,9 +258,8 @@ def confirm_checkin(row):
 
 def count_stats():
     with get_conn() as conn:
-        c = conn.cursor()
-        total = c.execute("SELECT COUNT(*) FROM master").fetchone()[0]
-        hadir = c.execute("SELECT COUNT(*) FROM attendance").fetchone()[0]
+        total = conn.execute("SELECT COUNT(*) FROM master").fetchone()[0]
+        hadir = conn.execute("SELECT COUNT(*) FROM attendance").fetchone()[0]
     return total, hadir, max(total - hadir, 0)
 
 def load_attendance():
@@ -251,18 +269,11 @@ def load_attendance():
             conn
         )
 
+
 # =========================
 # TABLE MAP
 # =========================
 def upsert_table_map(df_map: pd.DataFrame):
-    """
-    Mapping file kolum wajib:
-      - No_Meja
-      - x
-      - y
-    Kolum optional:
-      - r (default 18)
-    """
     df = df_map.copy()
     df.columns = [str(c).strip() for c in df.columns]
 
@@ -275,7 +286,6 @@ def upsert_table_map(df_map: pd.DataFrame):
         df["r"] = 18
 
     df["No_Meja"] = df["No_Meja"].apply(norm_meja)
-
     df["x"] = pd.to_numeric(df["x"], errors="coerce").fillna(0).astype(int)
     df["y"] = pd.to_numeric(df["y"], errors="coerce").fillna(0).astype(int)
     df["r"] = pd.to_numeric(df["r"], errors="coerce").fillna(18).astype(int)
@@ -283,9 +293,8 @@ def upsert_table_map(df_map: pd.DataFrame):
     df = df[df["No_Meja"].str.len() > 0]
 
     with get_conn() as conn:
-        c = conn.cursor()
         for _, r in df.iterrows():
-            c.execute("""
+            conn.execute("""
             INSERT INTO table_map(no_meja, x, y, r)
             VALUES (?, ?, ?, ?)
             ON CONFLICT(no_meja) DO UPDATE SET
@@ -298,8 +307,7 @@ def get_table_pos(no_meja: str):
     if not key:
         return None
     with get_conn() as conn:
-        row = conn.execute("SELECT x, y, r FROM table_map WHERE no_meja=?", (key,)).fetchone()
-    return row  # (x,y,r) or None
+        return conn.execute("SELECT x, y, r FROM table_map WHERE no_meja=?", (key,)).fetchone()
 
 def list_mapped_tables(limit=500):
     with get_conn() as conn:
@@ -320,6 +328,7 @@ def render_layout_with_highlight(layout_bytes: bytes, no_meja: str):
         draw.ellipse((x-r-4, y-r-4, x+r+4, y+r+4), outline="white", width=2)
         draw.text((x + r + 8, y - 10), f"MEJA {key}", fill="red")
     return img
+
 
 # =========================
 # UI (CSS)
@@ -412,23 +421,26 @@ def vip_card(nama, email, meja, status_text):
         unsafe_allow_html=True
     )
 
+
 # =========================
 # APP START
 # =========================
 init_db()
+migrate_event_assets_schema()
 inject_css()
 
 st.title("🎫 Sistem Check-in")
-st.caption("Flow: Poster → Check-in → Layout → Aturcara. Admin upload: XLSX + 3 gambar (Poster/Layout/Aturcara).")
+st.caption("Flow: Poster → Check-in → Layout → Aturcara. Admin upload: XLSX + Poster + Layout + Aturcara.")
 
 tab1, tab2 = st.tabs(["✅ Check-in", "🛠️ Admin"])
 
+
 # =========================================================
-# TAB 1: CHECK-IN (Poster atas → Check-in → Layout → Aturcara)
+# TAB 1: CHECK-IN
 # =========================================================
 with tab1:
-    # 1) POSTER (atas sekali)
-    poster_fn, poster_bytes, upd = get_asset_bytes("poster")
+    # 1) POSTER (atas sekali, sentiasa keluar)
+    poster_fn, poster_bytes, _ = get_asset_bytes("poster")
     if poster_bytes:
         try:
             st.image(Image.open(io.BytesIO(poster_bytes)), use_container_width=True)
@@ -441,7 +453,6 @@ with tab1:
 
     # 2) CHECK-IN
     st.subheader("Semakan Kehadiran Tetamu")
-
     email = st.text_input("Masukkan Email Jemputan", placeholder="contoh: nama@uitm.edu.my")
     email = norm_email(email)
 
@@ -469,11 +480,11 @@ with tab1:
                 st.success("Check-in berjaya direkod. Terima kasih!")
                 st.toast("✅ Check-in confirmed", icon="🎉")
 
-            # 3) LEPAS CHECK-IN: LAYOUT + HIGHLIGHT
+            # 3) LAYOUT (lepas check-in)
             st.markdown("---")
             st.subheader("🗺️ Layout Meja")
 
-            layout_fn, layout_bytes, upd2 = get_asset_bytes("layout")
+            layout_fn, layout_bytes, _ = get_asset_bytes("layout")
             if layout_bytes:
                 try:
                     img_h = render_layout_with_highlight(layout_bytes, no_meja)
@@ -486,11 +497,11 @@ with tab1:
             if not get_table_pos(no_meja):
                 st.warning(f"Mapping koordinat untuk meja {no_meja} belum ada. Admin perlu tambah dalam Table Map.")
 
-            # 4) LEPAS LAYOUT: ATURCARA (IMAGE)
+            # 4) ATURCARA (lepas layout)
             st.markdown("---")
             st.subheader("📌 Aturcara")
 
-            atur_fn, atur_bytes, upd3 = get_asset_bytes("aturcara")
+            atur_fn, atur_bytes, _ = get_asset_bytes("aturcara")
             if atur_bytes:
                 try:
                     st.image(Image.open(io.BytesIO(atur_bytes)), use_container_width=True, caption=atur_fn)
@@ -502,8 +513,9 @@ with tab1:
             if refresh:
                 st.rerun()
 
+
 # =========================================================
-# TAB 2: ADMIN (Upload 4 fail: XLSX + Poster + Layout + Aturcara)
+# TAB 2: ADMIN (Upload semua)
 # =========================================================
 with tab2:
     st.subheader("Admin (Upload Semua)")
@@ -578,7 +590,7 @@ with tab2:
         except Exception as e:
             st.error(f"Gagal simpan aturcara: {e}")
 
-    # Status assets ringkas
+    # Status assets
     st.markdown("---")
     st.markdown("### ✅ Status Assets (DB)")
     assets = load_assets()
@@ -593,7 +605,7 @@ with tab2:
     else:
         st.info("Belum ada assets disimpan.")
 
-    # 5) Table Map upload (kekal)
+    # 5) Table Map upload
     st.markdown("---")
     st.markdown("### 5) Upload Table Map (Koordinat Meja)")
     st.caption("Fail CSV/XLSX dengan kolum: No_Meja, x, y, (optional r). Contoh: A1, 610, 390, 18")
@@ -667,6 +679,7 @@ with tab2:
     att = load_attendance()
     st.dataframe(att, use_container_width=True, height=280)
 
+
 # =========================================================
 # MAINTENANCE (GLOBAL)
 # =========================================================
@@ -710,7 +723,7 @@ with st.expander("⚠️ Maintenance", expanded=False):
     with col5:
         if st.button("Reset Assets", use_container_width=True):
             with get_conn() as conn:
-                conn.execute("DELETE FROM event_assets")
+                conn.execute("UPDATE event_assets SET poster_filename=NULL, poster_bytes=NULL, layout_filename=NULL, layout_bytes=NULL, aturcara_filename=NULL, aturcara_bytes=NULL, updated_at=? WHERE id=1", (now_myt_str(),))
                 conn.commit()
             st.success("Assets (Poster/Layout/Aturcara) dikosongkan.")
             st.rerun()
@@ -723,7 +736,7 @@ with st.expander("⚠️ Maintenance", expanded=False):
             conn.execute("DELETE FROM attendance")
             conn.execute("DELETE FROM winners")
             conn.execute("DELETE FROM table_map")
-            conn.execute("DELETE FROM event_assets")
+            conn.execute("UPDATE event_assets SET poster_filename=NULL, poster_bytes=NULL, layout_filename=NULL, layout_bytes=NULL, aturcara_filename=NULL, aturcara_bytes=NULL, updated_at=? WHERE id=1", (now_myt_str(),))
             conn.commit()
         st.success("SEMUA data dikosongkan. Sila upload master + poster + layout + aturcara + map semula.")
         st.rerun()
