@@ -4,14 +4,14 @@ import sqlite3
 from datetime import datetime
 import time
 import pytz
-from PIL import Image, ImageDraw
+from PIL import Image
 import io
 import re
 
 # =========================
 # CONFIG
 # =========================
-st.set_page_config(page_title="Event Check-in", page_icon="🎫", layout="centered")
+st.set_page_config(page_title="Pendaftaran Majlis Hari Inovasi UiTMCNS 2025", page_icon="📝", layout="centered")
 
 DB_NAME = "dinner.db"
 
@@ -76,6 +76,7 @@ def init_db():
             no_meja TEXT
         )""")
 
+        # Kekal (walaupun layout tak highlight lagi)
         c.execute("""
         CREATE TABLE IF NOT EXISTS table_map (
             no_meja TEXT PRIMARY KEY,
@@ -94,10 +95,7 @@ def init_db():
         conn.commit()
 
 def migrate_event_assets_schema():
-    """
-    Auto-migrate table event_assets supaya tak crash bila DB lama.
-    Pastikan kolum untuk poster/layout/aturcara wujud, dan row id=1 wujud.
-    """
+    """Auto-migrate table event_assets supaya DB lama tak crash."""
     cols = {
         "poster_filename": "TEXT",
         "poster_bytes": "BLOB",
@@ -139,9 +137,7 @@ def migrate_event_assets_schema():
 # ASSETS (Poster/Layout/Aturcara) in DB
 # =========================
 def save_asset(kind: str, filename: str, data: bytes):
-    """
-    kind: "poster" | "layout" | "aturcara"
-    """
+    """kind: 'poster' | 'layout' | 'aturcara'"""
     if kind not in ("poster", "layout", "aturcara"):
         raise ValueError("Invalid kind for asset.")
 
@@ -168,7 +164,7 @@ def load_assets():
             FROM event_assets
             WHERE id=1
         """).fetchone()
-    return row  # or None
+    return row
 
 def get_asset_bytes(kind: str):
     row = load_assets()
@@ -211,9 +207,8 @@ def normalize_master(df: pd.DataFrame) -> pd.DataFrame:
 def import_master(df: pd.DataFrame):
     df = normalize_master(df)
     with get_conn() as conn:
-        c = conn.cursor()
         for _, r in df.iterrows():
-            c.execute("""
+            conn.execute("""
             INSERT INTO master(email, nama, gelaran, no_meja)
             VALUES (?, ?, ?, ?)
             ON CONFLICT(email) DO UPDATE SET
@@ -269,7 +264,7 @@ def load_attendance():
 
 
 # =========================
-# TABLE MAP
+# TABLE MAP (KEKAL)
 # =========================
 def upsert_table_map(df_map: pd.DataFrame):
     df = df_map.copy()
@@ -300,39 +295,17 @@ def upsert_table_map(df_map: pd.DataFrame):
             """, (r["No_Meja"], int(r["x"]), int(r["y"]), int(r["r"])))
         conn.commit()
 
-def get_table_pos(no_meja: str):
-    key = norm_meja(no_meja)
-    if not key:
-        return None
-    with get_conn() as conn:
-        return conn.execute("SELECT x, y, r FROM table_map WHERE no_meja=?", (key,)).fetchone()
-
 def list_mapped_tables(limit=500):
     with get_conn() as conn:
         df = pd.read_sql("SELECT no_meja, x, y, r FROM table_map ORDER BY no_meja ASC", conn)
     return df.head(limit)
-
-def render_layout_with_highlight(layout_bytes: bytes, no_meja: str):
-    img = Image.open(io.BytesIO(layout_bytes)).convert("RGB")
-    draw = ImageDraw.Draw(img)
-
-    key = norm_meja(no_meja)
-    pos = get_table_pos(key)
-
-    if pos and key:
-        x, y, r = pos
-        r = max(int(r), 8)
-        draw.ellipse((x-r, y-r, x+r, y+r), outline="red", width=6)
-        draw.ellipse((x-r-4, y-r-4, x+r+4, y+r+4), outline="white", width=2)
-        draw.text((x + r + 8, y - 10), f"MEJA {key}", fill="red")
-    return img
 
 
 # =========================
 # UI (CSS)
 # =========================
 def inject_css():
-    # LOCK ZOOM for mobile (laptop still can zoom via browser)
+    # LOCK ZOOM untuk phone (laptop tetap boleh zoom browser)
     st.markdown(
         '<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">',
         unsafe_allow_html=True
@@ -398,6 +371,22 @@ def inject_css():
       }
       .vip-status{ position: relative; margin-top: 12px; text-align:center; font-size: 14px; font-weight: 900; color: #D1FAE5; }
       .vip-meta{ position: relative; margin-top: 8px; text-align:center; font-size: 12px; opacity:.9; }
+      .titleWrap{
+        text-align:center;
+        margin: 8px 0 14px 0;
+      }
+      .titleMain{
+        font-size: 44px;
+        font-weight: 950;
+        letter-spacing: .3px;
+        line-height: 1.05;
+      }
+      .titleSub{
+        font-size: 18px;
+        font-weight: 800;
+        opacity: .75;
+        margin-top: 6px;
+      }
     </style>
     """, unsafe_allow_html=True)
 
@@ -405,8 +394,8 @@ def vip_card(nama, email, meja, status_text):
     st.markdown(
         f"""
         <div class="vip-card vip-animate">
-          <div class="vip-title">🎓 EVENT CHECK-IN</div>
-          <div class="vip-sub">Paparan Meja + Layout</div>
+          <div class="vip-title">📝 PENDAFTARAN</div>
+          <div class="vip-sub">Sila semak maklumat anda</div>
 
           <div class="vip-name">
             Selamat Datang<br>
@@ -414,7 +403,7 @@ def vip_card(nama, email, meja, status_text):
           </div>
 
           <div class="vip-meja-box">
-            <div class="vip-meja-label">NOMBOR MEJA ANDA</div>
+            <div class="vip-meja-label">NOMBOR MEJA</div>
             <div class="vip-meja-no">{meja}</div>
           </div>
 
@@ -433,9 +422,15 @@ init_db()
 migrate_event_assets_schema()
 inject_css()
 
-st.title("🎫 Sistem Check-in Majlis")
+# Tajuk premium (center)
+st.markdown("""
+<div class="titleWrap">
+  <div class="titleMain">Pendaftaran Majlis</div>
+  <div class="titleSub">Hari Inovasi UiTMCNS 2025</div>
+</div>
+""", unsafe_allow_html=True)
 
-tab1, tab2 = st.tabs(["✅ Check-in", "🛠️ Admin"])
+tab1, tab2 = st.tabs(["✅ Pendaftaran", "🛠️ Admin"])
 
 
 # =========================================================
@@ -455,7 +450,7 @@ with tab1:
     st.markdown("---")
 
     # Check-in
-    st.subheader("Semakan Kehadiran Tetamu")
+    st.subheader("Semakan Kehadiran")
     email = st.text_input("Masukkan Email Jemputan", placeholder="contoh: zahari@uitm.edu.my")
     email = norm_email(email)
 
@@ -468,37 +463,33 @@ with tab1:
             no_meja = norm_meja(no_meja)
 
             if already_checked_in(email_db):
-                vip_card(nama, email_db, no_meja, "ℹ️ Rekod wujud (sudah check-in)")
+                vip_card(nama, email_db, no_meja, "ℹ️ Rekod wujud (sudah daftar)")
             else:
-                vip_card(nama, email_db, no_meja, "✔ Sila sahkan kehadiran anda")
+                vip_card(nama, email_db, no_meja, "✔ Sila sahkan pendaftaran anda")
 
             colA, colB = st.columns([1, 1])
             with colA:
-                confirm = st.button("✅ Confirm Check-in", use_container_width=True)
+                confirm = st.button("✅ Confirm", use_container_width=True)
             with colB:
-                refresh = st.button("🔄 Reset / Tetamu seterusnya", use_container_width=True)
+                refresh = st.button("🔄 Reset", use_container_width=True)
 
             if confirm:
                 confirm_checkin((email_db, nama, gelaran, no_meja))
-                st.success("Check-in berjaya direkod. Terima kasih!")
-                st.toast("✅ Check-in confirmed", icon="🎉")
+                st.success("Pendaftaran berjaya direkod. Terima kasih!")
+                st.toast("✅ Confirmed", icon="🎉")
 
-            # Layout
+            # Layout (TANPA koordinat / TANPA highlight)
             st.markdown("---")
-            st.subheader("🗺️ Layout Meja")
+            st.subheader("🗺️ Layout Dewan")
 
             _, layout_bytes, _ = get_asset_bytes("layout")
             if layout_bytes:
                 try:
-                    img_h = render_layout_with_highlight(layout_bytes, no_meja)
-                    st.image(img_h, use_container_width=True, caption=f"Lokasi Meja {no_meja}")
+                    st.image(Image.open(io.BytesIO(layout_bytes)), use_container_width=True)
                 except Exception:
                     st.warning("Layout gagal dibaca. Admin upload semula.")
             else:
                 st.info("Layout belum dimasukkan.")
-
-            if not get_table_pos(no_meja):
-                st.warning(f"Koordinat meja {no_meja} belum ada. (Admin perlu tambah mapping)")
 
             # Aturcara
             st.markdown("---")
@@ -516,7 +507,6 @@ with tab1:
             if refresh:
                 st.rerun()
 
- 
 
 # =========================================================
 # TAB 2: ADMIN (Upload semua 4 file)
@@ -606,9 +596,9 @@ with tab2:
     else:
         st.info("Belum ada assets disimpan.")
 
-    # 5) Mapping
+    # Table Map kekal (kalau nak guna kemudian)
     st.markdown("---")
-    st.markdown("### 5) Upload Table Map (Koordinat Meja)")
+    st.markdown("### Table Map (Optional)")
     map_choice = st.radio("Format mapping", ["CSV", "Excel (XLSX)"], horizontal=True)
     if map_choice == "CSV":
         up_map = st.file_uploader("Upload Mapping CSV", type=["csv"], key="map_csv")
@@ -629,47 +619,14 @@ with tab2:
             except Exception as e:
                 st.error(f"Gagal import mapping: {e}")
 
-    st.markdown("### 6) Tambah / Edit 1 Meja (Manual)")
-    with st.form("add_one_map"):
-        c1, c2, c3, c4 = st.columns([1.2, 1, 1, 1])
-        with c1:
-            meja_in = st.text_input("No_Meja", placeholder="A1 / VIP1 / AJK1")
-        with c2:
-            x_in = st.number_input("x", min_value=0, max_value=10000, value=0, step=1)
-        with c3:
-            y_in = st.number_input("y", min_value=0, max_value=10000, value=0, step=1)
-        with c4:
-            r_in = st.number_input("r", min_value=5, max_value=200, value=18, step=1)
-
-        save_one = st.form_submit_button("💾 Save Mapping")
-        if save_one:
-            try:
-                df_one = pd.DataFrame([{"No_Meja": norm_meja(meja_in), "x": x_in, "y": y_in, "r": r_in}])
-                upsert_table_map(df_one)
-                st.success(f"Mapping {norm_meja(meja_in)} disimpan.")
-            except Exception as e:
-                st.error(f"Gagal simpan mapping: {e}")
-
-    st.markdown("---")
-    st.markdown("### 7) Preview Highlight (Test)")
     df_map_show = list_mapped_tables()
-    st.dataframe(df_map_show, use_container_width=True, height=240)
-
-    _, layout_bytes, _ = get_asset_bytes("layout")
-    if layout_bytes:
-        test_meja = st.text_input("Test No_Meja untuk highlight", placeholder="contoh: A1")
-        test_meja = norm_meja(test_meja)
-        if test_meja:
-            img_test = render_layout_with_highlight(layout_bytes, test_meja)
-            st.image(img_test, use_container_width=True, caption=f"Preview meja {test_meja}")
-            if not get_table_pos(test_meja):
-                st.warning("Meja ini belum ada mapping.")
+    st.dataframe(df_map_show, use_container_width=True, height=220)
 
     st.markdown("---")
     total, hadir, belum = count_stats()
     a, b, c = st.columns(3)
     a.metric("Total Jemputan", total)
-    b.metric("Dah Check-in", hadir)
+    b.metric("Dah Daftar", hadir)
     c.metric("Belum Hadir", belum)
 
     st.write("### 📋 Senarai Kehadiran")
@@ -681,8 +638,6 @@ with tab2:
 # MAINTENANCE (GLOBAL)
 # =========================================================
 with st.expander("⚠️ Maintenance", expanded=False):
-    st.caption("Reset untuk kosongkan data (guna bila mula event baru).")
-
     col1, col2, col3, col4, col5 = st.columns(5)
 
     with col1:
@@ -749,5 +704,5 @@ with st.expander("⚠️ Maintenance", expanded=False):
                 WHERE id=1
             """, (now_myt_str(),))
             conn.commit()
-        st.success("SEMUA data dikosongkan. Upload semula master + 3 gambar + mapping.")
+        st.success("SEMUA data dikosongkan. Upload semula master + 3 gambar + mapping (optional).")
         st.rerun()
